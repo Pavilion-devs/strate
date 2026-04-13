@@ -1,0 +1,36 @@
+{
+  "name": "wallet-agent-os",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "cli": "bun cli/index.ts",
+    "cli:file": "bun cli/index.ts --persist",
+    "cli:solana": "bun cli/index.ts --persist --solana",
+    "approval-api:serve": "bun cli/serve-approval-api.ts",
+    "smoke:payment-batch": "bun cli/smoke-test-payment-batch.ts",
+    "smoke:approval-hardening": "bun cli/smoke-test-approval-hardening.ts",
+    "smoke:external-approval-client": "bun cli/smoke-test-external-approval-client.ts",
+    "smoke:approval-api-service": "bun cli/smoke-test-approval-api-service.ts",
+    "smoke:approval-api-http": "bun cli/smoke-test-approval-api-http.ts",
+    "smoke:wallet-compliance-callback": "bun cli/smoke-test-wallet-compliance-callback.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@open-wallet-standard/core": "^1.2.0",
+    "@solana/spl-token": "^0.4.13",
+    "@solana/web3.js": "^1.98.2",
+    "@umbra-privacy/sdk": "^4.0.0",
+    "ink": "^7.0.0",
+    "openai": "^6.33.0",
+    "react": "^19.2.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "@types/react": "^19.2.14",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.4"
+  }
+}
