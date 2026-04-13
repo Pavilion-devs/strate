@@ -30,15 +30,15 @@
 
 import {
   getPublicBalanceToEncryptedBalanceDirectDepositorFunction,
+  getUmbraClient,
 } from '@umbra-privacy/sdk'
-import type { IUmbraClient } from '@umbra-privacy/sdk'
 import type {
   BroadcastInput,
   BroadcastRecord,
   BroadcastRefreshInput,
   Broadcaster,
 } from '../contracts/broadcast.js'
-import type { UmbraWalletProvider } from '../wallets/UmbraWalletProvider.js'
+import type { UmbraWalletProvider, UmbraClient } from '../wallets/UmbraWalletProvider.js'
 import { defaultIdGenerator, defaultNow } from '../runtime/types.js'
 
 // ─── Token decimals by symbol ─────────────────────────────────────────────────
@@ -51,6 +51,8 @@ const TOKEN_DECIMALS: Record<string, number> = {
   UMBRA: 9,
 }
 
+type UmbraNetwork = Parameters<typeof getUmbraClient>[0]['network']
+
 // ─── Dependencies ─────────────────────────────────────────────────────────────
 
 export type UmbraBroadcasterDependencies = {
@@ -62,13 +64,13 @@ export type UmbraBroadcasterDependencies = {
   /**
    * A pre-built Umbra client — alternative to walletProvider (testing).
    */
-  client?: IUmbraClient
+  client?: UmbraClient
   /**
    * Mint address overrides per asset symbol. Defaults to the standard devnet/mainnet
    * addresses for USDC, USDT, and wSOL.
    */
   mintAddresses?: Record<string, string>
-  network?: 'mainnet' | 'devnet' | 'localnet'
+  network?: UmbraNetwork
   now?: () => string
   createId?: (prefix: string) => string
 }
@@ -77,9 +79,9 @@ export type UmbraBroadcasterDependencies = {
 
 export class UmbraBroadcaster implements Broadcaster {
   private readonly walletProvider: UmbraWalletProvider | undefined
-  private readonly directClient: IUmbraClient | undefined
+  private readonly directClient: UmbraClient | undefined
   private readonly mintAddresses: Record<string, string>
-  private readonly network: 'mainnet' | 'devnet' | 'localnet'
+  private readonly network: UmbraNetwork
   private readonly now: () => string
   private readonly createId: (prefix: string) => string
 
@@ -99,15 +101,15 @@ export class UmbraBroadcaster implements Broadcaster {
 
   async broadcastSignedTransfer(input: BroadcastInput): Promise<BroadcastRecord> {
     const client = await this.resolveClient()
-    const network = `solana-${this.network}`
+    const solanaNetwork = `solana-${this.network}`
 
     const { transactionEnvelope, signatureRequestId } = input.signatureRequest
     const { toAddress, tokenMovements } = transactionEnvelope
 
-    // Extract amount and asset from the first token movement
+    // Extract amount and asset from the token movement targeting the destination
     const movement = tokenMovements.find((m) => m.toAddress === toAddress) ?? tokenMovements[0]
     if (!movement) {
-      return this.failedRecord(input.runId, signatureRequestId, network, 'No token movements in transaction envelope')
+      return this.failedRecord(input.runId, signatureRequestId, solanaNetwork, 'No token movements in transaction envelope')
     }
 
     const { assetSymbol, amount } = movement
@@ -116,7 +118,7 @@ export class UmbraBroadcaster implements Broadcaster {
       return this.failedRecord(
         input.runId,
         signatureRequestId,
-        network,
+        solanaNetwork,
         `UmbraBroadcaster: no mint address registered for asset ${assetSymbol}. ` +
         `Register it via mintAddresses in the constructor.`,
       )
@@ -127,13 +129,12 @@ export class UmbraBroadcaster implements Broadcaster {
     const rawAmount = toRawAmount(amount, decimals)
 
     try {
-      // Build and invoke the Umbra direct deposit function.
+      // Build the Umbra direct deposit function.
       // This moves tokens from sender's ATA → recipient's Encrypted Token Account (ETA)
       // via an Arcium MPC computation. Amount is hidden on-chain.
       const deposit = getPublicBalanceToEncryptedBalanceDirectDepositorFunction({ client })
 
-      // The deposit function signature:
-      //   deposit(recipientAddress, mintAddress, amount, options?) → Promise<TransactionSignature>
+      // deposit(recipientAddress, mintAddress, amount) → Promise<TransactionSignature>
       const txSignature = await deposit(
         toAddress as Parameters<typeof deposit>[0],
         mint as Parameters<typeof deposit>[1],
@@ -146,24 +147,21 @@ export class UmbraBroadcaster implements Broadcaster {
         submittedAt: this.now(),
         status: 'confirmed',
         transactionHash: String(txSignature),
-        network,
+        network: solanaNetwork,
         signatureRequestId,
         summary:
           `Umbra confidential deposit: ${amount} ${assetSymbol} → ETA of ${toAddress}. ` +
-          `Amount encrypted on-chain. Tx: ${String(txSignature)}`,
+          `Amount encrypted via Arcium MPC. Tx: ${String(txSignature)}`,
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      return this.failedRecord(input.runId, signatureRequestId, network, message)
+      return this.failedRecord(input.runId, signatureRequestId, solanaNetwork, message)
     }
   }
 
   async refreshBroadcast(input: BroadcastRefreshInput): Promise<BroadcastRecord> {
     // For Umbra deposits, the Arcium MPC computation finalises asynchronously.
-    // The submitted tx signature is confirmed once the queue instruction lands on-chain;
-    // the MPC callback settles the encrypted balance update separately.
-    // We return the existing record as confirmed — full finality can be tracked
-    // via the Arcium computation monitor (future extension).
+    // The queue instruction confirms once on-chain; MPC callback settles the balance separately.
     if (!input.record.transactionHash) {
       return {
         ...input.record,
@@ -183,7 +181,7 @@ export class UmbraBroadcaster implements Broadcaster {
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private async resolveClient(): Promise<IUmbraClient> {
+  private async resolveClient(): Promise<UmbraClient> {
     if (this.directClient) return this.directClient
     if (this.walletProvider) return this.walletProvider.getClient()
     throw new Error('UmbraBroadcaster: no client or walletProvider available')
@@ -219,7 +217,7 @@ function toRawAmount(amount: string, decimals: number): bigint {
   return BigInt(intPart + paddedFrac)
 }
 
-function defaultMintAddresses(network: 'mainnet' | 'devnet' | 'localnet'): Record<string, string> {
+function defaultMintAddresses(network: UmbraNetwork): Record<string, string> {
   if (network === 'mainnet') {
     return {
       USDC: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',

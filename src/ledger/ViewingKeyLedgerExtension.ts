@@ -9,52 +9,44 @@
  *
  * The Umbra SDK derives a hierarchical set of viewing keys from the user's master seed:
  *
- *   Master Viewing Key (MVK)
- *   └── Mint Viewing Key (per token)
- *       └── Yearly Viewing Key
- *           └── Monthly Viewing Key
- *               └── Daily Viewing Key (most granular — grants view of one calendar day)
+ *   Master Seed
+ *   └── Master Viewing Key (MVK)
+ *       └── Mint Viewing Key (per token)
+ *           └── Yearly Viewing Key → Monthly → Daily
  *
- * Each level of the hierarchy grants view access to all transactions within its
- * time span for that mint. A Daily key lets an auditor see only that day's USDC
- * transfers — nothing else.
+ * Each level grants read access to all transactions within its time span for that mint.
+ * A Daily key lets an auditor see only that day's USDC transfers — nothing else.
  *
  * ## Disclosure mechanism
  *
  * The `discloseTo()` method derives the appropriate viewing key for a given
  * reporting period and returns it as a base64-encoded string. The caller
- * (e.g., compliance officer UI) can then share this with an auditor, who
- * supplies it to the Umbra SDK's scanning functions to decrypt the relevant
- * ledger entries.
+ * (e.g., compliance officer UI) can share this with an auditor, who supplies it
+ * to the Umbra SDK's scanning functions to decrypt the relevant ledger entries.
  *
  * ## Storage
  *
  * Viewing keys are sensitive — equivalent to read access for the disclosed period.
- * This extension stores key *references* (metadata + opaque encoded blob) but
- * does NOT persist the raw key material to disk. Callers are responsible for
- * passing disclosed keys through a secure channel (encrypted, access-controlled).
+ * This extension returns key *disclosures* (metadata + encoded blob) but does NOT
+ * persist raw key material to disk. Callers are responsible for routing disclosed
+ * keys through a secure, encrypted channel.
  */
 
 import {
-  getMasterViewingKeyDeriver,
-  getMintViewingKeyDeriver,
   getYearlyViewingKeyDeriver,
   getMonthlyViewingKeyDeriver,
   getDailyViewingKeyDeriver,
+  getUmbraClient,
 } from '@umbra-privacy/sdk'
-import type { IUmbraClient } from '@umbra-privacy/sdk'
-import type { UmbraWalletProvider } from '../wallets/UmbraWalletProvider.js'
+import type { UmbraWalletProvider, UmbraClient } from '../wallets/UmbraWalletProvider.js'
+
+type UmbraNetwork = Parameters<typeof getUmbraClient>[0]['network']
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type ViewingKeyScope = 'yearly' | 'monthly' | 'daily'
 
 export type DisclosureParams = {
-  /**
-   * The Umbra wallet address that executed the transfer.
-   * Used to scope the disclosure to a specific wallet's activity.
-   */
-  walletAddress: string
   /**
    * The SPL token mint address for which to generate a viewing key.
    * Example: USDC mint on devnet = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'
@@ -69,7 +61,7 @@ export type DisclosureParams = {
   year: number
   month?: number
   day?: number
-  /** Target scope — if narrower fields are provided, this is inferred; explicit override allowed */
+  /** Explicit scope override — inferred from provided fields if omitted */
   scope?: ViewingKeyScope
 }
 
@@ -93,9 +85,9 @@ export type ViewingKeyDisclosure = {
 
 export class ViewingKeyLedgerExtension {
   private readonly walletProvider: UmbraWalletProvider | undefined
-  private readonly directClient: IUmbraClient | undefined
+  private readonly directClient: UmbraClient | undefined
 
-  constructor(deps: { walletProvider?: UmbraWalletProvider; client?: IUmbraClient }) {
+  constructor(deps: { walletProvider?: UmbraWalletProvider; client?: UmbraClient }) {
     if (!deps.walletProvider && !deps.client) {
       throw new Error('ViewingKeyLedgerExtension: supply either walletProvider or client')
     }
@@ -104,73 +96,60 @@ export class ViewingKeyLedgerExtension {
   }
 
   /**
-   * Derives an Umbra compliance viewing key for the given wallet + mint + period.
+   * Derives an Umbra compliance viewing key for the given mint + reporting period.
    *
-   * The returned key can be handed to an auditor or compliance system. They use it
-   * with the Umbra SDK's UTXO scanner to decrypt transaction records for the
-   * specified mint and time window — without accessing any other transfers.
+   * The returned key can be handed to an auditor or compliance system. They supply it
+   * to the Umbra SDK's UTXO scanner to decrypt transaction records for the specified
+   * mint and time window — without accessing any other transfers.
    *
-   * @throws if the Umbra client is not initialized or the master seed is unavailable.
+   * @throws if the Umbra client is not initialised or the master seed is unavailable.
    */
   async discloseTo(params: DisclosureParams): Promise<ViewingKeyDisclosure> {
     const client = await this.resolveClient()
-
     const resolvedScope = resolveScope(params)
-    const masterSeed = await client.masterSeed.getMasterSeed()
 
-    // Derive master viewing key from seed
-    const masterViewingKeyDeriver = getMasterViewingKeyDeriver(client)
-    const mvk = await masterViewingKeyDeriver(masterSeed)
+    const { mintAddress, year, month = 1, day = 1 } = params
+    const mint = mintAddress as Parameters<ReturnType<typeof getYearlyViewingKeyDeriver>>[0]
 
-    // Derive mint-scoped viewing key
-    const mintViewingKeyDeriver = getMintViewingKeyDeriver(client)
-    const mintKey = await mintViewingKeyDeriver(mvk, params.mintAddress as Parameters<typeof mintViewingKeyDeriver>[1])
+    // Year / Month / Day must be bigint (Umbra uses branded bigint types internally)
+    const yearN = BigInt(year) as unknown as Parameters<ReturnType<typeof getYearlyViewingKeyDeriver>>[1]
+    const monthN = BigInt(month) as unknown as Parameters<ReturnType<typeof getMonthlyViewingKeyDeriver>>[2]
+    const dayN = BigInt(day) as unknown as Parameters<ReturnType<typeof getDailyViewingKeyDeriver>>[3]
 
-    let keyBytes: Uint8Array
+    let keyValue: unknown
     let period: { from: string; to: string }
     let description: string
 
-    const { year, month = 1, day = 1 } = params
-
     if (resolvedScope === 'yearly') {
-      const yearlyDeriver = getYearlyViewingKeyDeriver(client)
-      const yearlyKey = await yearlyDeriver(mintKey, year as Parameters<typeof yearlyDeriver>[1])
-      keyBytes = serializeViewingKey(yearlyKey)
+      const deriver = getYearlyViewingKeyDeriver({ client })
+      keyValue = await deriver(mint, yearN)
       period = {
         from: `${year}-01-01`,
         to: `${year}-12-31`,
       }
-      description = `Yearly viewing key for ${params.mintAddress} — ${year}`
+      description = `Yearly viewing key for ${mintAddress} — ${year}`
     } else if (resolvedScope === 'monthly') {
-      const yearlyDeriver = getYearlyViewingKeyDeriver(client)
-      const yearlyKey = await yearlyDeriver(mintKey, year as Parameters<typeof yearlyDeriver>[1])
-      const monthlyDeriver = getMonthlyViewingKeyDeriver(client)
-      const monthlyKey = await monthlyDeriver(yearlyKey, month as Parameters<typeof monthlyDeriver>[1])
-      keyBytes = serializeViewingKey(monthlyKey)
+      const deriver = getMonthlyViewingKeyDeriver({ client })
+      keyValue = await deriver(mint, yearN, monthN)
       const lastDay = new Date(year, month, 0).getDate()
+      const mm = String(month).padStart(2, '0')
       period = {
-        from: `${year}-${String(month).padStart(2, '0')}-01`,
-        to: `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`,
+        from: `${year}-${mm}-01`,
+        to: `${year}-${mm}-${String(lastDay).padStart(2, '0')}`,
       }
-      description = `Monthly viewing key for ${params.mintAddress} — ${year}/${String(month).padStart(2, '0')}`
+      description = `Monthly viewing key for ${mintAddress} — ${year}/${mm}`
     } else {
-      // daily
-      const yearlyDeriver = getYearlyViewingKeyDeriver(client)
-      const yearlyKey = await yearlyDeriver(mintKey, year as Parameters<typeof yearlyDeriver>[1])
-      const monthlyDeriver = getMonthlyViewingKeyDeriver(client)
-      const monthlyKey = await monthlyDeriver(yearlyKey, month as Parameters<typeof monthlyDeriver>[1])
-      const dailyDeriver = getDailyViewingKeyDeriver(client)
-      const dailyKey = await dailyDeriver(monthlyKey, day as Parameters<typeof dailyDeriver>[1])
-      keyBytes = serializeViewingKey(dailyKey)
+      const deriver = getDailyViewingKeyDeriver({ client })
+      keyValue = await deriver(mint, yearN, monthN, dayN)
       const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
       period = { from: dateStr, to: dateStr }
-      description = `Daily viewing key for ${params.mintAddress} — ${dateStr}`
+      description = `Daily viewing key for ${mintAddress} — ${dateStr}`
     }
 
     return {
-      keyBase64: Buffer.from(keyBytes).toString('base64'),
+      keyBase64: Buffer.from(serializeViewingKey(keyValue)).toString('base64'),
       scope: resolvedScope,
-      mintAddress: params.mintAddress,
+      mintAddress,
       period,
       description,
     }
@@ -178,7 +157,7 @@ export class ViewingKeyLedgerExtension {
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private async resolveClient(): Promise<IUmbraClient> {
+  private async resolveClient(): Promise<UmbraClient> {
     if (this.directClient) return this.directClient
     if (this.walletProvider) return this.walletProvider.getClient()
     throw new Error('ViewingKeyLedgerExtension: no client available')
@@ -195,18 +174,17 @@ function resolveScope(params: DisclosureParams): ViewingKeyScope {
 }
 
 /**
- * Converts a viewing key object (opaque SDK type) into a Uint8Array for encoding.
- * Umbra viewing keys are Poseidon field elements — serialised as 32-byte little-endian.
+ * Serialises an Umbra viewing key (opaque SDK type) into a Uint8Array.
+ * Umbra viewing keys are BN254 field elements (≤252-bit bigint).
+ * We encode them as 32-byte big-endian for portability.
  */
 function serializeViewingKey(key: unknown): Uint8Array {
-  // Umbra viewing keys are objects with a `value` field (bigint) or a raw Uint8Array.
-  // Try each representation in order.
   if (key instanceof Uint8Array) return key
 
   if (typeof key === 'bigint') {
     const buf = new Uint8Array(32)
     let v = key
-    for (let i = 0; i < 32; i++) {
+    for (let i = 31; i >= 0; i--) {
       buf[i] = Number(v & 0xffn)
       v >>= 8n
     }
@@ -217,7 +195,7 @@ function serializeViewingKey(key: unknown): Uint8Array {
     const obj = key as Record<string, unknown>
     if (obj['value'] instanceof Uint8Array) return obj['value'] as Uint8Array
     if (typeof obj['value'] === 'bigint') return serializeViewingKey(obj['value'])
-    if (typeof obj['bytes'] !== 'undefined') return serializeViewingKey(obj['bytes'])
+    if (obj['bytes'] instanceof Uint8Array) return obj['bytes'] as Uint8Array
   }
 
   // Fallback: JSON-encode the key structure

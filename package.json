@@ -7,6 +7,8 @@
     "cli": "bun cli/index.ts",
     "cli:file": "bun cli/index.ts --persist",
     "cli:solana": "bun cli/index.ts --persist --solana",
+    "cli:umbra": "bun cli/umbra.ts",
+    "cli:umbra:persist": "bun cli/umbra.ts --persist",
     "approval-api:serve": "bun cli/serve-approval-api.ts",
     "smoke:payment-batch": "bun cli/smoke-test-payment-batch.ts",
     "smoke:approval-hardening": "bun cli/smoke-test-approval-hardening.ts",
@@ -14,6 +16,7 @@
     "smoke:approval-api-service": "bun cli/smoke-test-approval-api-service.ts",
     "smoke:approval-api-http": "bun cli/smoke-test-approval-api-http.ts",
     "smoke:wallet-compliance-callback": "bun cli/smoke-test-wallet-compliance-callback.ts",
+    "smoke:umbra-payroll": "bun cli/smoke-test-umbra-payroll.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

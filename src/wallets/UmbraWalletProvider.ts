@@ -30,7 +30,6 @@ import {
   createSignerFromPrivateKeyBytes,
   getUmbraClient,
 } from '@umbra-privacy/sdk'
-import type { IUmbraClient, IUmbraSigner, GetUmbraClientArgs } from '@umbra-privacy/sdk'
 import type {
   WalletProvider,
   WalletProviderResolutionInput,
@@ -43,7 +42,15 @@ import type { WalletRegistry } from './WalletRegistry.js'
 import { InMemoryWalletRegistry } from './WalletRegistry.js'
 import { defaultNow } from '../runtime/types.js'
 
-export type UmbraNetwork = 'mainnet' | 'devnet' | 'localnet'
+// ─── Inferred types from SDK ──────────────────────────────────────────────────
+
+type UmbraClient = Awaited<ReturnType<typeof getUmbraClient>>
+type UmbraSigner = Parameters<typeof getUmbraClient>[0]['signer']
+type UmbraNetwork = Parameters<typeof getUmbraClient>[0]['network']
+
+export type { UmbraClient, UmbraSigner, UmbraNetwork }
+
+// ─── Dependencies ─────────────────────────────────────────────────────────────
 
 export type UmbraWalletProviderDependencies = {
   network?: UmbraNetwork
@@ -52,9 +59,9 @@ export type UmbraWalletProviderDependencies = {
   /** Base64-encoded 64-byte Solana keypair or 32-byte seed. Omit to generate a fresh in-memory signer (testing). */
   secretKeyBase64?: string
   /** Pre-built signer — takes precedence over secretKeyBase64 */
-  signer?: IUmbraSigner
+  signer?: UmbraSigner
   /** Pre-built Umbra client — skips getUmbraClient() entirely (testing) */
-  client?: IUmbraClient
+  client?: UmbraClient
   registry?: WalletRegistry
   now?: () => string
   skipAccountValidation?: boolean
@@ -63,35 +70,25 @@ export type UmbraWalletProviderDependencies = {
   deferMasterSeedSignature?: boolean
 }
 
-// ─── USDC mint addresses per network ────────────────────────────────────────
-
-const USDC_MINTS: Record<UmbraNetwork, string> = {
-  mainnet: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
-  devnet: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
-  localnet: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
-}
-
 // ─── Provider ────────────────────────────────────────────────────────────────
 
 export class UmbraWalletProvider implements WalletProvider {
   private readonly network: UmbraNetwork
   private readonly registry: WalletRegistry
   private readonly now: () => string
-  private readonly skipAccountValidation: boolean
   private readonly defaultSignerProfileId: string | undefined
 
   /** Lazily resolved Umbra client — a single shared instance per provider */
-  private readonly clientPromise: Promise<IUmbraClient>
+  private readonly clientPromise: Promise<UmbraClient>
 
   private constructor(
-    clientPromise: Promise<IUmbraClient>,
+    clientPromise: Promise<UmbraClient>,
     deps: UmbraWalletProviderDependencies,
   ) {
     this.clientPromise = clientPromise
     this.network = deps.network ?? 'devnet'
     this.registry = deps.registry ?? new InMemoryWalletRegistry()
     this.now = deps.now ?? defaultNow
-    this.skipAccountValidation = deps.skipAccountValidation ?? true
     this.defaultSignerProfileId = deps.defaultSignerProfileId
   }
 
@@ -99,12 +96,10 @@ export class UmbraWalletProvider implements WalletProvider {
    * Async factory — preferred entry point.
    *
    * Builds the Umbra signer (or accepts one), then kicks off the async
-   * getUmbraClient() call and stores the resulting promise. The promise is
-   * awaited lazily on the first provider call, so construction is synchronous
-   * from the caller's perspective.
+   * getUmbraClient() call and stores the resulting promise.
    */
   static async create(deps: UmbraWalletProviderDependencies = {}): Promise<UmbraWalletProvider> {
-    let clientPromise: Promise<IUmbraClient>
+    let clientPromise: Promise<UmbraClient>
 
     if (deps.client) {
       clientPromise = Promise.resolve(deps.client)
@@ -114,7 +109,7 @@ export class UmbraWalletProvider implements WalletProvider {
       const rpcUrl = deps.rpcUrl ?? defaultRpcUrl(network)
       const rpcSubscriptionsUrl = deps.rpcSubscriptionsUrl ?? defaultWsUrl(network)
 
-      const args: GetUmbraClientArgs = {
+      clientPromise = getUmbraClient({
         signer,
         network,
         rpcUrl,
@@ -122,21 +117,15 @@ export class UmbraWalletProvider implements WalletProvider {
         ...(deps.deferMasterSeedSignature !== undefined
           ? { deferMasterSeedSignature: deps.deferMasterSeedSignature }
           : {}),
-      }
-      clientPromise = getUmbraClient(args)
+      })
     }
 
     return new UmbraWalletProvider(clientPromise, deps)
   }
 
-  /** Exposes the Umbra client promise for use in UmbraBroadcaster and ViewingKeyLedgerExtension */
-  async getClient(): Promise<IUmbraClient> {
+  /** Exposes the Umbra client for use in UmbraBroadcaster and ViewingKeyLedgerExtension */
+  async getClient(): Promise<UmbraClient> {
     return this.clientPromise
-  }
-
-  /** Returns the USDC mint for the current network */
-  getUsdcMint(): string {
-    return USDC_MINTS[this.network]
   }
 
   // ── WalletProvider interface ──────────────────────────────────────────────
@@ -222,15 +211,13 @@ export class UmbraWalletProvider implements WalletProvider {
       address,
       providerId: 'umbra_wallet_provider',
       // Note: in-memory signers do not expose raw secret key bytes via the IUmbraSigner interface.
-      // Store the signer profile separately in production (KMS, etc.).
+      // Store the signer profile separately in production (KMS / MPC coordinator).
     }
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private static async buildSigner(
-    deps: UmbraWalletProviderDependencies,
-  ): Promise<IUmbraSigner> {
+  private static async buildSigner(deps: UmbraWalletProviderDependencies): Promise<UmbraSigner> {
     if (deps.signer) return deps.signer
 
     if (deps.secretKeyBase64) {

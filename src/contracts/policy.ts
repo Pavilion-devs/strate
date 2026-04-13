@@ -102,6 +102,17 @@ export type PolicyEmergencyRules = {
   incidentModeRestrictions?: string[]
 }
 
+export type UmbraPolicyConfig = {
+  /** Privacy routing for outbound transfers */
+  defaultPath: 'confidential' | 'anonymous' | 'transparent'
+  /** When true, force UTXO mixer for high-value transfers (amount-blinded) */
+  mixerRequired: boolean
+  /** Controls whether viewing keys are captured at execution time */
+  viewingKeyRetention: 'always' | 'on_request' | 'never'
+  /** Pre-authorized auditor public keys that can receive viewing key disclosures */
+  disclosureRecipients: string[]
+}
+
 export type PolicyProfile = {
   policyProfileId: string
   version: string
@@ -119,5 +130,7 @@ export type PolicyProfile = {
   identity: PolicyIdentityRules
   trust: PolicyTrustRules
   emergency: PolicyEmergencyRules
+  /** Umbra privacy layer configuration — present only when Umbra broadcast adapter is active */
+  umbra?: UmbraPolicyConfig
   derivedToolPolicy?: Record<string, unknown>
 }
